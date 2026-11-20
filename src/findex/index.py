@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import array
+import os
 import struct
+import time
 from collections import defaultdict
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
+from typing import Literal
 
 from findex.corpus import iter_documents
 from findex.tokenizer import tokenize
@@ -233,3 +237,151 @@ def open_index(path: str | Path) -> Generator[Index]:
         yield idx
     finally:
         idx.close()
+
+
+ExecutorName = Literal["serial", "threads", "processes"]
+
+
+@dataclass(frozen=True)
+class PartialIndex:
+    docs: list[DocumentMeta]
+    postings: dict[str, list[Posting]]
+
+
+@dataclass(frozen=True)
+class BuildStats:
+    merge_time_sec: float
+    num_chunks: int
+
+
+def collect_corpus_paths(corpus_dir: str | Path) -> list[Path]:
+    root = Path(corpus_dir)
+    if not root.exists() or not root.is_dir():
+        raise FileNotFoundError(f"Corpus directory not found: {root}")
+    return sorted(
+        (p for p in root.rglob("*.txt") if p.is_file() and not p.name.startswith(".")),
+        key=lambda p: p.name,
+    )
+
+
+def chunk_paths(paths: Sequence[Path], num_chunks: int) -> list[tuple[int, list[Path]]]:
+    if not paths:
+        return []
+    n_chunks = max(1, min(num_chunks, len(paths)))
+    base_size, remainder = divmod(len(paths), n_chunks)
+    chunks: list[tuple[int, list[Path]]] = []
+    offset = 0
+    for i in range(n_chunks):
+        size = base_size + (1 if i < remainder else 0)
+        chunks.append((offset, list(paths[offset : offset + size])))
+        offset += size
+    return chunks
+
+
+def build_partial(
+    paths: Sequence[Path],
+    start_doc_id: int = 0,
+    store_positions: bool = True,
+) -> PartialIndex:
+    """Функція рівня модуля для побудови часткового індексу у воркері (потік або процес)."""
+    postings_map: dict[str, list[Posting]] = defaultdict(list)
+    docs_meta: list[DocumentMeta] = []
+
+    for local_idx, file_path in enumerate(paths):
+        doc_id = start_doc_id + local_idx
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+
+        term_positions: dict[str, list[int]] = defaultdict(list)
+        token_count = 0
+
+        for pos, token in enumerate(tokenize(text)):
+            token_count += 1
+            if store_positions:
+                term_positions[token].append(pos)
+            elif token not in term_positions:
+                term_positions[token] = [1]
+            else:
+                term_positions[token][0] += 1
+
+        for term, pos_list in term_positions.items():
+            if store_positions:
+                postings_map[term].append((doc_id, len(pos_list), tuple(pos_list)))
+            else:
+                postings_map[term].append((doc_id, pos_list[0], ()))
+
+        docs_meta.append(
+            DocumentMeta(
+                doc_id=doc_id,
+                name=file_path.name,
+                path=str(file_path.resolve()),
+                length=token_count,
+            )
+        )
+
+    return PartialIndex(docs=docs_meta, postings=dict(postings_map))
+
+
+def merge_partial_indexes(
+    partials: Sequence[PartialIndex],
+    store_positions: bool = True,
+) -> Index:
+    """Злиття часткових індексів із неперетинними впорядкованими діапазонами doc_id."""
+    ordered = sorted(partials, key=lambda p: p.docs[0].doc_id if p.docs else 0)
+    merged_docs: list[DocumentMeta] = []
+    merged_postings: dict[str, list[Posting]] = defaultdict(list)
+
+    for part in ordered:
+        merged_docs.extend(part.docs)
+        for term, plist in part.postings.items():
+            merged_postings[term].extend(plist)
+
+    return Index(postings=dict(merged_postings), docs=merged_docs, has_positions=store_positions)
+
+def build_parallel_index(
+    corpus_dir: str | Path,
+    workers: int | None = None,
+    executor_kind: ExecutorName = "processes",
+    store_positions: bool = True,
+    on_progress: Callable[[int, str], None] | None = None,
+) -> tuple[Index, BuildStats]:
+    paths = collect_corpus_paths(corpus_dir)
+    if not paths:
+        return Index(postings={}, docs=[], has_positions=store_positions), BuildStats(0.0, 0)
+
+    n_workers = workers if workers is not None and workers > 0 else (os.cpu_count() or 1)
+    chunks = chunk_paths(paths, 1 if executor_kind == "serial" else n_workers)
+    partials: list[PartialIndex] = []
+    done_docs = 0
+
+    if executor_kind == "serial" or len(chunks) == 1:
+        for start_id, chunk in chunks:
+            part = build_partial(chunk, start_doc_id=start_id, store_positions=store_positions)
+            partials.append(part)
+            done_docs += len(chunk)
+            if on_progress is not None:
+                on_progress(done_docs, chunk[-1].name)
+    else:
+        pool_cls = ThreadPoolExecutor if executor_kind == "threads" else ProcessPoolExecutor
+        pool = pool_cls(max_workers=len(chunks))
+        try:
+            future_to_chunk = {
+                pool.submit(build_partial, chunk, start_id, store_positions): chunk
+                for start_id, chunk in chunks
+            }
+            for fut in as_completed(future_to_chunk):
+                part = fut.result()
+                chunk = future_to_chunk[fut]
+                partials.append(part)
+                done_docs += len(chunk)
+                if on_progress is not None:
+                    on_progress(done_docs, chunk[-1].name)
+        except Exception:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+
+    t_merge0 = time.perf_counter()
+    final_index = merge_partial_indexes(partials, store_positions=store_positions)
+    merge_elapsed = time.perf_counter() - t_merge0
+    return final_index, BuildStats(merge_time_sec=merge_elapsed, num_chunks=len(chunks))

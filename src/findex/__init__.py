@@ -1,15 +1,45 @@
-from findex.index import Index, open_index
-from findex.query import parse_query
+from findex.index import (
+    BuildStats,
+    DocumentMeta,
+    ExecutorName,
+    Index,
+    PartialIndex,
+    build_parallel_index,
+    build_partial,
+    chunk_paths,
+    collect_corpus_paths,
+    merge_partial_indexes,
+    merge_postings,
+    open_index,
+)
+from findex.query import And, Not, Or, Phrase, QueryNode, QuerySyntaxError, Term, parse_query
 from findex.scoring import BM25, Scorer, SearchResult, TfIdf
 from findex.search import SearchEngine
 
 __all__ = [
     "BM25",
+    "And",
+    "BuildStats",
+    "DocumentMeta",
+    "ExecutorName",
     "Index",
+    "Not",
+    "Or",
+    "PartialIndex",
+    "Phrase",
+    "QueryNode",
+    "QuerySyntaxError",
     "Scorer",
     "SearchEngine",
     "SearchResult",
+    "Term",
     "TfIdf",
+    "build_parallel_index",
+    "build_partial",
+    "chunk_paths",
+    "collect_corpus_paths",
+    "merge_partial_indexes",
+    "merge_postings",
     "open_index",
     "parse_query",
 ]

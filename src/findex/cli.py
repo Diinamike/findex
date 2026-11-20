@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
-from findex.index import Index, open_index
+from findex.index import ExecutorName, build_parallel_index, collect_corpus_paths, open_index
 from findex.query import EngineName, QuerySyntaxError
 from findex.scoring import ScorerName, get_scorer
 from findex.search import SearchEngine
@@ -69,16 +69,27 @@ def build_index(
         bool,
         typer.Option("--positions/--no-positions", help="Store token positions for phrase search."),
     ] = True,
+    workers: Annotated[
+        int | None,
+        typer.Option("--workers", "-w", min=1, help="Number of worker threads/processes."),
+    ] = None,
+    executor: Annotated[
+        ExecutorName,
+        typer.Option(
+            "--executor",
+            "-e",
+            help="Execution backend: serial, threads, or processes (default: processes).",
+        ),
+    ] = "processes",
 ) -> None:
     """Build an inverted index from a directory of text files."""
-    if not corpus_dir.exists() or not corpus_dir.is_dir():
-        err_console.print(f"[red]Error:[/red] Corpus directory not found: {corpus_dir}")
-        raise typer.Exit(code=1)
+    try:
+        paths = collect_corpus_paths(corpus_dir)
+    except FileNotFoundError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
 
-    total_files = sum(
-        1 for p in corpus_dir.rglob("*.txt") if p.is_file() and not p.name.startswith(".")
-    )
-    if total_files == 0:
+    if not paths:
         err_console.print(f"[red]Error:[/red] No .txt files found in {corpus_dir}")
         raise typer.Exit(code=1)
 
@@ -91,12 +102,18 @@ def build_index(
             console=err_console,
             transient=True,
         ) as progress:
-            task = progress.add_task("Indexing documents...", total=total_files)
+            task = progress.add_task(f"Indexing ({executor})...", total=len(paths))
 
             def on_progress(count: int, filename: str) -> None:
                 progress.update(task, completed=count, description=f"Indexing {filename[:28]}")
 
-            idx = Index.build(corpus_dir, store_positions=positions, on_progress=on_progress)
+            idx, stats = build_parallel_index(
+                corpus_dir,
+                workers=workers,
+                executor_kind=executor,
+                store_positions=positions,
+                on_progress=on_progress,
+            )
             idx.save(out)
             summary = repr(idx)
             idx.close()
@@ -104,7 +121,10 @@ def build_index(
         err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from None
 
-    err_console.print(f"[green]Saved[/green] {summary} -> {out}")
+    err_console.print(
+        f"[green]Saved[/green] {summary} -> {out} "
+        f"(executor={executor}, chunks={stats.num_chunks}, merge={stats.merge_time_sec * 1000:.1f} ms)"
+    )
 
 
 @app.command("search")
