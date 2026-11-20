@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import array
+import struct
+from collections import defaultdict
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import cached_property
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
+from findex.corpus import iter_documents
+from findex.tokenizer import tokenize
+from findex.utils import timed
+
+Posting = Tuple[int, int, Tuple[int, ...]]
+MAGIC = b"FIDX03"
+
+
+@dataclass
+class DocumentMeta:
+    doc_id: int
+    name: str
+    path: str
+    length: int
+
+
+class Index(Mapping[str, List[Posting]]):
+    def __init__(
+        self,
+        postings: Optional[Dict[str, List[Posting]]] = None,
+        docs: Optional[List[DocumentMeta]] = None,
+        has_positions: bool = True,
+    ) -> None:
+        self._postings: Dict[str, List[Posting]] = postings or {}
+        self._docs: List[DocumentMeta] = docs or []
+        self.has_positions: bool = has_positions
+        self._closed: bool = False
+
+    def __getitem__(self, term: str) -> List[Posting]:
+        self._ensure_open()
+        return self._postings[term]
+
+    def __iter__(self) -> Iterator[str]:
+        self._ensure_open()
+        return iter(self._postings)
+
+    def __len__(self) -> int:
+        self._ensure_open()
+        return len(self._postings)
+
+    def __contains__(self, term: object) -> bool:
+        self._ensure_open()
+        return term in self._postings
+
+    def __repr__(self) -> str:
+        status = "closed" if self._closed else "open"
+        return (
+            f"Index(docs={self.num_docs}, terms={len(self._postings)}, "
+            f"positions={self.has_positions}, status={status!r})"
+        )
+
+    @property
+    def num_docs(self) -> int:
+        return len(self._docs)
+
+    @cached_property
+    def avg_doc_length(self) -> float:
+        if not self._docs:
+            return 0.0
+        return sum(d.length for d in self._docs) / len(self._docs)
+
+    def df(self, term: str) -> int:
+        postings = self._postings.get(term)
+        return len(postings) if postings else 0
+
+    def get_doc(self, doc_id: int) -> DocumentMeta:
+        return self._docs[doc_id]
+
+    def read_doc_text(self, doc_id: int) -> str:
+        meta = self._docs[doc_id]
+        return Path(meta.path).read_text(encoding="utf-8", errors="replace")
+
+    def close(self) -> None:
+        self._postings.clear()
+        self._docs.clear()
+        self.__dict__.pop("avg_doc_length", None)
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ValueError("Operation on closed Index")
+
+    @classmethod
+    @timed
+    def build(
+        cls,
+        corpus_dir: Union[str, Path],
+        store_positions: bool = True,
+    ) -> "Index":
+        corpus_path = Path(corpus_dir)
+        postings_map: Dict[str, List[Posting]] = defaultdict(list)
+        docs_meta: List[DocumentMeta] = []
+
+        for doc_id, (filename, text) in enumerate(iter_documents(corpus_path)):
+            term_positions: Dict[str, List[int]] = defaultdict(list)
+            token_count = 0
+
+            for pos, token in enumerate(tokenize(text)):
+                token_count += 1
+                if store_positions:
+                    term_positions[token].append(pos)
+                else:
+                    if token not in term_positions:
+                        term_positions[token] = [0]
+                    else:
+                        term_positions[token][0] += 1
+
+            for term, pos_list in term_positions.items():
+                if store_positions:
+                    postings_map[term].append((doc_id, len(pos_list), tuple(pos_list)))
+                else:
+                    postings_map[term].append((doc_id, pos_list[0] + 1, ()))
+
+            full_path = str((corpus_path / filename).resolve())
+            docs_meta.append(
+                DocumentMeta(doc_id=doc_id, name=filename, path=full_path, length=token_count)
+            )
+
+        return cls(postings=dict(postings_map), docs=docs_meta, has_positions=store_positions)
+
+    def save(self, path: Union[str, Path]) -> None:
+        out_path = Path(path)
+        with out_path.open("wb") as f:
+            f.write(MAGIC)
+            f.write(struct.pack("<BII", int(self.has_positions), len(self._docs), len(self._postings)))
+
+            for doc in self._docs:
+                name_b = doc.name.encode("utf-8")
+                path_b = doc.path.encode("utf-8")
+                f.write(struct.pack("<H", len(name_b)))
+                f.write(name_b)
+                f.write(struct.pack("<H", len(path_b)))
+                f.write(path_b)
+                f.write(struct.pack("<I", doc.length))
+
+            for term, plist in self._postings.items():
+                term_b = term.encode("utf-8")
+                f.write(struct.pack("<HI", len(term_b), len(plist)))
+                f.write(term_b)
+
+                for doc_id, tf, positions in plist:
+                    f.write(struct.pack("<II", doc_id, tf))
+                    if self.has_positions:
+                        arr = array.array("I", positions)
+                        arr.tofile(f)
+
+    @classmethod
+    @timed
+    def load(cls, path: Union[str, Path]) -> "Index":
+        in_path = Path(path)
+        with in_path.open("rb") as f:
+            magic = f.read(len(MAGIC))
+            if magic != MAGIC:
+                raise ValueError(f"Invalid index file header in {in_path}")
+
+            has_pos_flag, num_docs, num_terms = struct.unpack("<BII", f.read(9))
+            has_positions = bool(has_pos_flag)
+
+            docs: List[DocumentMeta] = []
+            for doc_id in range(num_docs):
+                (name_len,) = struct.unpack("<H", f.read(2))
+                name = f.read(name_len).decode("utf-8")
+                (path_len,) = struct.unpack("<H", f.read(2))
+                doc_path = f.read(path_len).decode("utf-8")
+                (length,) = struct.unpack("<I", f.read(4))
+                docs.append(DocumentMeta(doc_id=doc_id, name=name, path=doc_path, length=length))
+
+            postings: Dict[str, List[Posting]] = {}
+            for _ in range(num_terms):
+                term_len, plist_len = struct.unpack("<HI", f.read(6))
+                term = f.read(term_len).decode("utf-8")
+
+                plist: List[Posting] = []
+                for _ in range(plist_len):
+                    doc_id, tf = struct.unpack("<II", f.read(8))
+                    if has_positions:
+                        arr = array.array("I")
+                        arr.fromfile(f, tf)
+                        plist.append((doc_id, tf, tuple(arr)))
+                    else:
+                        plist.append((doc_id, tf, ()))
+                postings[term] = plist
+
+        return cls(postings=postings, docs=docs, has_positions=has_positions)
+
+
+@contextmanager
+def open_index(path: Union[str, Path]) -> Iterator[Index]:
+    idx = Index.load(path)
+    try:
+        yield idx
+    finally:
+        idx.close()
