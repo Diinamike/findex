@@ -1,0 +1,12 @@
+https://docs.python.org/3/library/tkinter.colorchooser.html
+
+tkinter.colorchooser — Color choosing dialog — Python 3.15.2 documentation Theme Auto Light Dark Previous topic tkinter — Python interface to Tcl/Tk Next topic tkinter.font — Tkinter font wrapper This page Report a bug Improve this page Show source Navigation index modules | next | previous | Python » 3.15.2 documentation » The Python standard library » Graphical user interfaces with Tk » tkinter.colorchooser — Color choosing dialog | Theme Auto Light Dark | tkinter.colorchooser — Color choosing dialog ¶ Source code: Lib/tkinter/colorchooser.py The tkinter.colorchooser module provides the Chooser class
+as an interface to the native color picker dialog. Chooser implements
+a modal color choosing dialog window. The Chooser class inherits from
+the Dialog class. class tkinter.colorchooser. Chooser ( master = None , ** options ) ¶ The class implementing the modal color-choosing dialog.
+Most applications use the askcolor() convenience function rather than
+instantiating this class directly. tkinter.colorchooser. askcolor ( color = None , ** options ) ¶ Show a modal color-choosing dialog and return the chosen color. color is the color selected when the dialog opens.
+The return value is a tuple ((r, g, b), hexstr) , where r , g and b are the red, green and blue components as integers in the range 0–255
+and hexstr is the equivalent Tk color string, such as '#ff8000' .
+If the user cancels the dialog, (None, None) is returned. Changed in version 3.10: The RGB values in the returned color are now integers in the range 0–255
+instead of floats. See also Module tkinter.commondialog Tkinter standard dialog module Previous topic tkinter — Python interface to Tcl/Tk Next topic tkinter.font — Tkinter font wrapper This page Report a bug Improve this page Show source « Navigation index modules | next | previous | Python » 3.15.2 documentation » The Python standard library » Graphical user interfaces with Tk » tkinter.colorchooser — Color choosing dialog | Theme Auto Light Dark | © Copyright 2001 Python Software Foundation. This page is licensed under the Python Software Foundation License Version 2. Examples, recipes, and other code in the documentation are additionally licensed under the Zero Clause BSD License. See History and License for more information. The Python Software Foundation is a non-profit corporation. Please donate. Last updated on Nov 20, 2026 (13:36 UTC). Found a bug ? Created using Sphinx 9.1.1.

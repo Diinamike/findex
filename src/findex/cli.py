@@ -329,3 +329,23 @@ def crawl_cmd(
         f"{(stats.fetched / max(stats.pages_per_sec, 1e-6)):.2f}s "
         f"({stats.pages_per_sec:.2f} pages/s, errors={stats.errors}) -> {out} (log: {log_file})"
     )
+
+
+@app.command("serve")
+def serve_cmd(
+    host: Annotated[str, typer.Option("--host", help="Bind socket to this host.")] = "0.0.0.0",
+    port: Annotated[int, typer.Option("--port", "-p", min=1, max=65535, help="Port to listen on.")] = 8000,
+    workers: Annotated[int, typer.Option("--workers", "-w", min=1, help="Number of worker processes.")] = 1,
+) -> None:
+    """Start the FastAPI web search server with uvicorn."""
+    import uvicorn
+
+    err_console.print(
+        f"[green]Starting findex web server[/green] on http://{host}:{port} (workers={workers})"
+    )
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+    )

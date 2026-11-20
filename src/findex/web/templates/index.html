@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>findex — Повнотекстовий пошук</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --mark-bg: #fef08a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    .container { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+    .brand { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; color: var(--text); text-decoration: none; }
+    .brand span { color: var(--accent); }
+    .badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; background: #e0e7ff; color: #1e40af; font-weight: 600; }
+    .badge.warn { background: #fee2e2; color: #991b1b; }
+    .search-box { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04); margin-bottom: 24px; }
+    .search-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    input[type="text"] { flex: 1 1 340px; padding: 12px 14px; font-size: 1rem; border: 1px solid var(--border); border-radius: 10px; outline: none; }
+    input[type="text"]:focus { border-color: var(--accent); }
+    select, button { padding: 12px 16px; font-size: 0.95rem; border-radius: 10px; border: 1px solid var(--border); background: #fff; cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+    button.primary:hover { background: var(--accent-hover); }
+    .hint { margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
+    .meta-bar { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 0.9rem; margin-bottom: 14px; }
+    .hit { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 14px; }
+    .hit-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+    .hit-title { font-size: 1.08rem; font-weight: 700; color: var(--accent); text-decoration: none; word-break: break-word; }
+    .hit-title:hover { text-decoration: underline; }
+    .score { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; background: #f1f5f9; padding: 3px 8px; border-radius: 6px; color: #334155; white-space: nowrap; }
+    .snippet { color: #334155; font-size: 0.95rem; margin: 0; }
+    mark { background: var(--mark-bg); color: #0f172a; padding: 0 3px; border-radius: 4px; font-weight: 600; }
+    .pagination { display: flex; justify-content: center; align-items: center; gap: 14px; margin-top: 24px; }
+    .page-link { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); text-decoration: none; font-size: 0.9rem; font-weight: 500; }
+    .page-link.disabled { opacity: 0.45; pointer-events: none; }
+    .error-box { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 14px 16px; border-radius: 10px; margin-bottom: 18px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <a href="/" class="brand">findex<span>.search</span></a>
+      {% if index_loaded %}
+        <span class="badge">Індекс активний · {{ num_docs }} док.</span>
+      {% else %}
+        <span class="badge warn">Індекс не завантажено (INDEX_PATH)</span>
+      {% endif %}
+    </header>
+
+    <form class="search-box" method="get" action="/">
+      <div class="search-row">
+        <input type="text" name="q" value="{{ q }}" placeholder="Введіть запит, напр.: TaskGroup AND Semaphore або &quot;event loop&quot;" autofocus />
+        <select name="scorer" aria-label="Модель ранжування">
+          <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
+          <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
+        </select>
+        <button type="submit" class="primary">Знайти</button>
+      </div>
+      <div class="hint">
+        Булеві оператори: <code>AND</code>, <code>OR</code>, <code>NOT</code>, дужки <code>(...)</code>, фрази в лапках.
+        API: <a href="/docs" style="color: var(--accent);">/docs</a> · <a href="/health" style="color: var(--accent);">/health</a> · <a href="/stats" style="color: var(--accent);">/stats</a>
+      </div>
+    </form>
+
+    {% if error_message %}
+      <div class="error-box">{{ error_message }}</div>
+    {% endif %}
+
+    {% if q and not error_message %}
+      <div class="meta-bar">
+        <span>Знайдено документів: <strong>{{ total_hits }}</strong></span>
+        <span>Сторінка {{ page }} із {{ total_pages if total_pages > 0 else 1 }} ({{ scorer | upper }})</span>
+      </div>
+
+      {% if results %}
+        {% for hit in results %}
+          <article class="hit">
+            <div class="hit-top">
+              <a class="hit-title" href="/doc/{{ hit.doc_id }}?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page }}">
+                #{{ hit.doc_id }} · {{ hit.doc_name }}
+              </a>
+              <span class="score">score: {{ "%.4f" | format(hit.score) }}</span>
+            </div>
+            <p class="snippet">{{ hit.snippet | highlight_snippet }}</p>
+          </article>
+        {% endfor %}
+
+        {% if total_pages > 1 %}
+          <nav class="pagination">
+            <a class="page-link {% if page <= 1 %}disabled{% endif %}" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page - 1 }}">← Попередня</a>
+            <span>Сторінка {{ page }} / {{ total_pages }}</span>
+            <a class="page-link {% if page >= total_pages %}disabled{% endif %}" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page + 1 }}">Наступна →</a>
+          </nav>
+        {% endif %}
+      {% else %}
+        <div class="hit"><p class="snippet">За запитом <strong>«{{ q }}»</strong> збігів не знайдено.</p></div>
+      {% endif %}
+    {% endif %}
+  </div>
+</body>
+</html>

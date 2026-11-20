@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ doc.doc_name }} — findex</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #0f172a; line-height: 1.65; }
+    .container { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+    .back { display: inline-block; margin-bottom: 18px; color: #2563eb; text-decoration: none; font-weight: 600; }
+    .back:hover { text-decoration: underline; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 24px 28px; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04); }
+    h1 { margin: 0 0 8px; font-size: 1.35rem; word-break: break-word; }
+    .meta { color: #64748b; font-size: 0.9rem; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid #e2e8f0; }
+    pre.doc-text { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 0; color: #1e293b; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    {% if back_q %}
+      <a class="back" href="/?q={{ back_q | urlencode }}&scorer={{ scorer }}&page={{ page }}">← Назад до результатів пошуку</a>
+    {% else %}
+      <a class="back" href="/">← На головну сторінку пошуку</a>
+    {% endif %}
+    <article class="card">
+      <h1>{{ doc.doc_name }}</h1>
+      <div class="meta">
+        ID документа: <strong>#{{ doc.doc_id }}</strong> · Довжина: <strong>{{ doc.length }}</strong> токенів
+        {% if doc.doc_name.startswith("http") %}
+          · <a href="{{ doc.doc_name }}" target="_blank" rel="noopener" style="color: #2563eb;">Відкрити оригінал ↗</a>
+        {% endif %}
+      </div>
+      <pre class="doc-text">{{ doc.text }}</pre>
+    </article>
+  </div>
+</body>
+</html>
