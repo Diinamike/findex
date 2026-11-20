@@ -221,3 +221,111 @@ def stats_cmd(
         for i, (tf_sum, term) in enumerate(top_terms, start=1):
             freq_table.add_row(str(i), term, str(tf_sum))
         out_console.print(freq_table)
+
+
+@app.command("crawl")
+def crawl_cmd(
+    start_url: Annotated[str, typer.Argument(help="Seed URL to start crawling from.")],
+    out: Annotated[Path, typer.Option("--out", "-o", help="Output JSONL file path.")] = Path(
+        "data/crawled.jsonl"
+    ),
+    max_pages: Annotated[
+        int, typer.Option("--max-pages", "-m", min=1, help="Maximum number of pages to fetch.")
+    ] = 200,
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", "-c", min=1, help="Global concurrent requests limit.")
+    ] = 10,
+    per_host: Annotated[
+        int, typer.Option("--per-host", min=1, help="Max concurrent requests per host.")
+    ] = 4,
+    delay: Annotated[
+        float, typer.Option("--delay", min=0.0, help="Minimum delay (sec) between requests to same host.")
+    ] = 0.05,
+    prefix: Annotated[
+        str | None, typer.Option("--prefix", help="Restrict crawled URLs to this prefix.")
+    ] = None,
+    log_file: Annotated[
+        Path, typer.Option("--log", help="Path to detailed crawl status log file.")
+    ] = Path("crawl.log"),
+    debug: Annotated[
+        bool, typer.Option("--debug", help="Run asyncio event loop in debug mode.")
+    ] = False,
+) -> None:
+    """Asynchronously crawl web pages with asyncio + httpx and stream to JSONL."""
+    import asyncio
+
+    from rich.live import Live
+
+    from findex.crawler import CrawlStats, crawl
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    crawler_logger = logging.getLogger("findex.crawler")
+    crawler_logger.handlers.clear()
+    crawler_logger.setLevel(logging.INFO)
+    crawler_logger.propagate = False
+    fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    crawler_logger.addHandler(fh)
+
+    stats = CrawlStats()
+
+    def render_status() -> Table:
+        tbl = Table(title="findex async crawler", show_header=True, header_style="bold cyan")
+        tbl.add_column("Collected", justify="right")
+        tbl.add_column("Speed (pages/s)", justify="right")
+        tbl.add_column("In-flight", justify="right")
+        tbl.add_column("Errors", justify="right")
+        tbl.add_column("Queue depth", justify="right")
+        tbl.add_row(
+            f"{stats.fetched}/{max_pages}",
+            f"{stats.pages_per_sec:.2f}",
+            str(stats.in_flight),
+            str(stats.errors),
+            str(stats.queue_depth),
+        )
+        return tbl
+
+    async def _run() -> None:
+        if debug:
+            loop = asyncio.get_running_loop()
+            loop.slow_callback_duration = 0.05
+
+        with out.open("w", encoding="utf-8") as jf, Live(
+            render_status(), console=err_console, refresh_per_second=8
+        ) as live:
+            async for page in crawl(
+                start_url,
+                max_pages=max_pages,
+                concurrency=concurrency,
+                per_host_limit=per_host,
+                min_delay=delay,
+                allowed_prefix=prefix,
+                stats=stats,
+            ):
+                record = {
+                    "url": page.url,
+                    "title": page.title,
+                    "text": page.text,
+                    "status_code": page.status_code,
+                    "bytes": page.bytes_read,
+                    "elapsed_sec": round(page.elapsed_sec, 4),
+                    "depth": page.depth,
+                }
+                jf.write(json.dumps(record, ensure_ascii=False) + "\n")
+                jf.flush()
+                live.update(render_status())
+            live.update(render_status())
+
+    try:
+        asyncio.run(_run(), debug=debug)
+    finally:
+        fh.close()
+        crawler_logger.removeHandler(fh)
+
+    err_console.print(
+        f"[green]Crawled[/green] {stats.fetched} pages in "
+        f"{(stats.fetched / max(stats.pages_per_sec, 1e-6)):.2f}s "
+        f"({stats.pages_per_sec:.2f} pages/s, errors={stats.errors}) -> {out} (log: {log_file})"
+    )

@@ -344,7 +344,12 @@ def build_parallel_index(
     store_positions: bool = True,
     on_progress: Callable[[int, str], None] | None = None,
 ) -> tuple[Index, BuildStats]:
-    paths = collect_corpus_paths(corpus_dir)
+    src_path = Path(corpus_dir)
+    if src_path.is_file() and src_path.suffix == ".jsonl":
+        t_seq0 = time.perf_counter()
+        idx = Index.build(src_path, store_positions=store_positions, on_progress=on_progress)
+        return idx, BuildStats(merge_time_sec=time.perf_counter() - t_seq0, num_chunks=1)
+    paths = collect_corpus_paths(src_path)
     if not paths:
         return Index(postings={}, docs=[], has_positions=store_positions), BuildStats(0.0, 0)
 
