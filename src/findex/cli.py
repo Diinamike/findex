@@ -15,10 +15,11 @@ from findex.index import ExecutorName, build_parallel_index, collect_corpus_path
 from findex.query import EngineName, QuerySyntaxError
 from findex.scoring import ScorerName, get_scorer
 from findex.search import SearchEngine
+from findex.semantic import DEFAULT_EMBED_MODEL, FastEmbedder, SearchMode, SemanticIndex
 
 app = typer.Typer(
     name="findex",
-    help="Full-text search engine CLI (inverted index, boolean/phrase queries, TF-IDF & BM25).",
+    help="Full-text & semantic search engine CLI (inverted index, BM25/TF-IDF, MiniLM embeddings, RRF).",
     no_args_is_help=True,
 )
 
@@ -127,10 +128,50 @@ def build_index(
     )
 
 
+@app.command("embed")
+def embed_cmd(
+    index_path: Annotated[Path, typer.Argument(help="Path to binary index file.")],
+    out: Annotated[
+        Path, typer.Option("--out", "-o", help="Output .npy embeddings matrix path.")
+    ] = Path("data/prod_embeddings.npy"),
+    model: Annotated[
+        str,
+        typer.Option("--model", "-m", help="Sentence embedding model name."),
+    ] = DEFAULT_EMBED_MODEL,
+    chunk_words: Annotated[
+        int,
+        typer.Option("--chunk-words", min=32, max=512, help="Words per text chunk."),
+    ] = 160,
+    overlap_words: Annotated[
+        int,
+        typer.Option("--overlap-words", min=0, max=256, help="Overlap words between chunks."),
+    ] = 32,
+) -> None:
+    """Split indexed documents into chunks, compute L2-normalized embeddings, and save to .npy."""
+    try:
+        with open_index(index_path) as idx:
+            err_console.print(f"Encoding chunks with [cyan]{model}[/cyan]...")
+            sem_idx = SemanticIndex.build(
+                idx,
+                embedder=FastEmbedder(model_name=model),
+                chunk_words=chunk_words,
+                overlap_words=overlap_words,
+            )
+            sem_idx.save(out)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    err_console.print(
+        f"[green]Saved[/green] SemanticIndex(docs={sem_idx.num_docs}, chunks={sem_idx.num_chunks}, "
+        f"dim={sem_idx.dim}) -> {out}"
+    )
+
+
 @app.command("search")
 def search_cmd(
     index_path: Annotated[Path, typer.Argument(help="Path to binary index file.")],
-    query: Annotated[str, typer.Argument(help="Boolean or phrase query.")],
+    query: Annotated[str, typer.Argument(help="Boolean, phrase, or natural-language query.")],
     top_k: Annotated[int, typer.Option("--top-k", "-k", help="Number of results to show.")] = 5,
     scorer: Annotated[
         ScorerName, typer.Option("--scorer", "-s", help="Ranking model: bm25 or tfidf.")
@@ -138,15 +179,40 @@ def search_cmd(
     engine: Annotated[
         EngineName, typer.Option("--engine", "-e", help="Boolean intersection engine: set or merge.")
     ] = "set",
+    mode: Annotated[
+        SearchMode,
+        typer.Option("--mode", "-m", help="Search mode: lexical, semantic, or hybrid."),
+    ] = "lexical",
+    embeddings: Annotated[
+        Path | None,
+        typer.Option("--embeddings", help="Path to .npy embeddings matrix (for semantic/hybrid)."),
+    ] = None,
     as_json: Annotated[
         bool, typer.Option("--json", help="Output clean JSON results to stdout.")
     ] = False,
 ) -> None:
     """Search the index and display ranked results."""
     try:
+        sem_idx: SemanticIndex | None = None
+        if mode in ("semantic", "hybrid"):
+            emb_path = embeddings or index_path.with_name("prod_embeddings.npy")
+            if not emb_path.exists():
+                emb_path = Path("data/prod_embeddings.npy")
+            sem_idx = SemanticIndex.load(emb_path)
+
         with open_index(index_path) as idx:
-            search_engine = SearchEngine(idx, default_scorer=get_scorer(scorer))
-            results = search_engine.search(query, top_k=top_k, engine=engine, with_snippets=True)
+            search_engine = SearchEngine(
+                idx,
+                default_scorer=get_scorer(scorer),
+                semantic_index=sem_idx,
+            )
+            results = search_engine.search(
+                query,
+                top_k=top_k,
+                engine=engine,
+                with_snippets=True,
+                mode=mode,
+            )
     except (FileNotFoundError, QuerySyntaxError, ValueError, OSError) as exc:
         err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -169,7 +235,8 @@ def search_cmd(
         err_console.print("No matching documents found.")
         return
 
-    table = Table(title=f"Search results for: {query} ({scorer.upper()})")
+    mode_label = f"{mode.upper()} · {scorer.upper()}" if mode != "semantic" else "SEMANTIC · MiniLM"
+    table = Table(title=f"Search results for: {query} ({mode_label})")
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
     table.add_column("Document", style="bold")
     table.add_column("Score", justify="right", style="green")

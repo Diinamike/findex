@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>findex — Повнотекстовий пошук</title>
+  <title>findex — Гібридний повнотекстовий та семантичний пошук</title>
   <style>
     :root {
       --bg: #f8fafc;
@@ -23,17 +23,19 @@
       color: var(--text);
       line-height: 1.55;
     }
-    .container { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+    .container { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
     .brand { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; color: var(--text); text-decoration: none; }
     .brand span { color: var(--accent); }
+    .badges { display: flex; gap: 8px; flex-wrap: wrap; }
     .badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; background: #e0e7ff; color: #1e40af; font-weight: 600; }
+    .badge.sem { background: #dcfce7; color: #166534; }
     .badge.warn { background: #fee2e2; color: #991b1b; }
     .search-box { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04); margin-bottom: 24px; }
     .search-row { display: flex; gap: 10px; flex-wrap: wrap; }
-    input[type="text"] { flex: 1 1 340px; padding: 12px 14px; font-size: 1rem; border: 1px solid var(--border); border-radius: 10px; outline: none; }
+    input[type="text"] { flex: 1 1 320px; padding: 12px 14px; font-size: 1rem; border: 1px solid var(--border); border-radius: 10px; outline: none; }
     input[type="text"]:focus { border-color: var(--accent); }
-    select, button { padding: 12px 16px; font-size: 0.95rem; border-radius: 10px; border: 1px solid var(--border); background: #fff; cursor: pointer; }
+    select, button { padding: 12px 14px; font-size: 0.95rem; border-radius: 10px; border: 1px solid var(--border); background: #fff; cursor: pointer; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
     button.primary:hover { background: var(--accent-hover); }
     .hint { margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
@@ -55,16 +57,26 @@
   <div class="container">
     <header>
       <a href="/" class="brand">findex<span>.search</span></a>
-      {% if index_loaded %}
-        <span class="badge">Індекс активний · {{ num_docs }} док.</span>
-      {% else %}
-        <span class="badge warn">Індекс не завантажено (INDEX_PATH)</span>
-      {% endif %}
+      <div class="badges">
+        {% if index_loaded %}
+          <span class="badge">Індекс активний · {{ num_docs }} док.</span>
+        {% else %}
+          <span class="badge warn">Індекс не завантажено (INDEX_PATH)</span>
+        {% endif %}
+        {% if semantic_loaded %}
+          <span class="badge sem">MiniLM · Hybrid RRF готовий</span>
+        {% endif %}
+      </div>
     </header>
 
     <form class="search-box" method="get" action="/">
       <div class="search-row">
-        <input type="text" name="q" value="{{ q }}" placeholder="Введіть запит, напр.: TaskGroup AND Semaphore або &quot;event loop&quot;" autofocus />
+        <input type="text" name="q" value="{{ q }}" placeholder="Введіть запит, напр.: TaskGroup AND Semaphore або опис змісту..." autofocus />
+        <select name="mode" aria-label="Режим пошуку">
+          <option value="lexical" {% if mode == "lexical" %}selected{% endif %}>Lexical (Точний)</option>
+          <option value="semantic" {% if mode == "semantic" %}selected{% endif %}>Semantic (MiniLM)</option>
+          <option value="hybrid" {% if mode == "hybrid" %}selected{% endif %}>Hybrid (RRF)</option>
+        </select>
         <select name="scorer" aria-label="Модель ранжування">
           <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
           <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
@@ -72,7 +84,7 @@
         <button type="submit" class="primary">Знайти</button>
       </div>
       <div class="hint">
-        Булеві оператори: <code>AND</code>, <code>OR</code>, <code>NOT</code>, дужки <code>(...)</code>, фрази в лапках.
+        Режими: <strong>Lexical</strong> (булеві <code>AND</code>/<code>OR</code>/<code>NOT</code> + фрази), <strong>Semantic</strong> (векторна близькість), <strong>Hybrid</strong> (RRF-злиття).
         API: <a href="/docs" style="color: var(--accent);">/docs</a> · <a href="/health" style="color: var(--accent);">/health</a> · <a href="/stats" style="color: var(--accent);">/stats</a>
       </div>
     </form>
@@ -84,14 +96,14 @@
     {% if q and not error_message %}
       <div class="meta-bar">
         <span>Знайдено документів: <strong>{{ total_hits }}</strong></span>
-        <span>Сторінка {{ page }} із {{ total_pages if total_pages > 0 else 1 }} ({{ scorer | upper }})</span>
+        <span>Сторінка {{ page }} із {{ total_pages if total_pages > 0 else 1 }} ({{ mode | upper }} · {{ scorer | upper }})</span>
       </div>
 
       {% if results %}
         {% for hit in results %}
           <article class="hit">
             <div class="hit-top">
-              <a class="hit-title" href="/doc/{{ hit.doc_id }}?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page }}">
+              <a class="hit-title" href="/doc/{{ hit.doc_id }}?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page }}">
                 #{{ hit.doc_id }} · {{ hit.doc_name }}
               </a>
               <span class="score">score: {{ "%.4f" | format(hit.score) }}</span>
@@ -102,9 +114,9 @@
 
         {% if total_pages > 1 %}
           <nav class="pagination">
-            <a class="page-link {% if page <= 1 %}disabled{% endif %}" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page - 1 }}">← Попередня</a>
+            <a class="page-link {% if page <= 1 %}disabled{% endif %}" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page - 1 }}">← Попередня</a>
             <span>Сторінка {{ page }} / {{ total_pages }}</span>
-            <a class="page-link {% if page >= total_pages %}disabled{% endif %}" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page + 1 }}">Наступна →</a>
+            <a class="page-link {% if page >= total_pages %}disabled{% endif %}" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page + 1 }}">Наступна →</a>
           </nav>
         {% endif %}
       {% else %}

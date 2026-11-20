@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 ScorerChoice = Literal["bm25", "tfidf"]
+ModeChoice = Literal["lexical", "semantic", "hybrid"]
 
 
 class SearchHitOut(BaseModel):
@@ -17,6 +18,7 @@ class SearchHitOut(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     scorer: ScorerChoice
+    mode: ModeChoice = "lexical"
     page: int
     page_size: int
     total_hits: int
@@ -48,6 +50,7 @@ class StatsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "unavailable"]
     index_loaded: bool
+    semantic_loaded: bool = False
     num_docs: int = 0
     detail: str = ""
 

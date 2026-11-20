@@ -13,12 +13,17 @@ from functools import cached_property
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
+import numpy.typing as npt
+
 from findex.corpus import iter_documents
 from findex.tokenizer import tokenize
 from findex.utils import timed
 
 Posting = tuple[int, int, tuple[int, ...]]
+Int32Array = npt.NDArray[np.int32]
 MAGIC = b"FIDX04"
+_EMPTY_INT32: Int32Array = np.empty(0, dtype=np.int32)
 
 
 def merge_postings(left: list[int], right: list[int]) -> list[int]:
@@ -52,32 +57,83 @@ class Index(Mapping[str, list[Posting]]):
         postings: dict[str, list[Posting]] | None = None,
         docs: list[DocumentMeta] | None = None,
         has_positions: bool = True,
+        *,
+        posting_doc_ids: dict[str, Int32Array] | None = None,
+        posting_tfs: dict[str, Int32Array] | None = None,
+        posting_positions: dict[str, tuple[tuple[int, ...], ...]] | None = None,
     ) -> None:
-        self._postings: dict[str, list[Posting]] = postings or {}
         self._docs: list[DocumentMeta] = docs or []
+        self.doc_lengths: Int32Array = np.array(
+            [d.length for d in self._docs], dtype=np.int32
+        )
         self.has_positions: bool = has_positions
         self._closed: bool = False
+        self._text_cache: dict[int, str] = {}
+
+        self._postings_cache: dict[str, list[Posting]] = {}
+        self._doc_ids: dict[str, Int32Array] = {}
+        self._tfs: dict[str, Int32Array] = {}
+        self._positions: dict[str, tuple[tuple[int, ...], ...]] = {}
+
+        if posting_doc_ids is not None and posting_tfs is not None:
+            self._doc_ids = posting_doc_ids
+            self._tfs = posting_tfs
+            self._positions = posting_positions or {}
+        elif postings:
+            self._postings_cache = dict(postings)
+            for term, plist in postings.items():
+                if plist:
+                    self._doc_ids[term] = np.array([p[0] for p in plist], dtype=np.int32)
+                    self._tfs[term] = np.array([p[1] for p in plist], dtype=np.int32)
+                    if has_positions:
+                        self._positions[term] = tuple(p[2] for p in plist)
+                else:
+                    self._doc_ids[term] = _EMPTY_INT32
+                    self._tfs[term] = _EMPTY_INT32
+                    if has_positions:
+                        self._positions[term] = ()
+
+    def postings_arrays(self, term: str) -> tuple[Int32Array, Int32Array]:
+        self._ensure_open()
+        d_ids = self._doc_ids.get(term)
+        if d_ids is None:
+            return _EMPTY_INT32, _EMPTY_INT32
+        return d_ids, self._tfs[term]
 
     def __getitem__(self, term: str) -> list[Posting]:
         self._ensure_open()
-        return self._postings[term]
+        cached = self._postings_cache.get(term)
+        if cached is not None:
+            return cached
+        d_ids = self._doc_ids[term]
+        tfs = self._tfs[term]
+        pos_tuple = self._positions.get(term)
+        if pos_tuple is not None and len(pos_tuple) == len(d_ids):
+            plist = [
+                (int(d), int(tf), pos)
+                for d, tf, pos in zip(d_ids.tolist(), tfs.tolist(), pos_tuple, strict=True)
+            ]
+        else:
+            plist = [(int(d), int(tf), ()) for d, tf in zip(d_ids.tolist(), tfs.tolist(), strict=True)]
+        self._postings_cache[term] = plist
+        return plist
 
     def __iter__(self) -> Iterator[str]:
         self._ensure_open()
-        return iter(self._postings)
+        return iter(self._doc_ids)
 
     def __len__(self) -> int:
         self._ensure_open()
-        return len(self._postings)
+        return len(self._doc_ids)
 
     def __contains__(self, term: object) -> bool:
         self._ensure_open()
-        return term in self._postings
+        return term in self._doc_ids
 
     def __repr__(self) -> str:
         status = "closed" if self._closed else "open"
         return (
-            f"Index(docs={self.num_docs}, terms={len(self._postings)}, "
+            f"Index(docs={self.num_docs}, terms={len(self._doc_ids)}, "
             f"positions={self.has_positions}, status={status!r})"
         )
 
@@ -87,30 +143,40 @@ class Index(Mapping[str, list[Posting]]):
 
     @cached_property
     def avg_doc_length(self) -> float:
-        if not self._docs:
+        if self.doc_lengths.size == 0:
             return 0.0
-        return sum(d.length for d in self._docs) / len(self._docs)
+        return float(self.doc_lengths.mean())
 
     def df(self, term: str) -> int:
-        postings = self._postings.get(term)
-        return len(postings) if postings else 0
+        d_ids = self._doc_ids.get(term)
+        return int(d_ids.size) if d_ids is not None else 0
 
     def doc_ids_for(self, term: str) -> list[int]:
-        postings = self._postings.get(term)
-        if not postings:
+        d_ids = self._doc_ids.get(term)
+        if d_ids is None or d_ids.size == 0:
             return []
-        return [doc_id for doc_id, _, _ in postings]
+        return d_ids.tolist()
 
     def get_doc(self, doc_id: int) -> DocumentMeta:
         return self._docs[doc_id]
 
     def read_doc_text(self, doc_id: int) -> str:
+        cached = self._text_cache.get(doc_id)
+        if cached is not None:
+            return cached
         meta = self._docs[doc_id]
-        return Path(meta.path).read_text(encoding="utf-8", errors="replace")
+        text = Path(meta.path).read_text(encoding="utf-8", errors="replace")
+        self._text_cache[doc_id] = text
+        return text
 
     def close(self) -> None:
-        self._postings.clear()
+        self._postings_cache.clear()
+        self._doc_ids.clear()
+        self._tfs.clear()
+        self._positions.clear()
         self._docs.clear()
+        self._text_cache.clear()
+        self.doc_lengths = _EMPTY_INT32
         self.__dict__.pop("avg_doc_length", None)
         self._closed = True
 
@@ -164,7 +230,7 @@ class Index(Mapping[str, list[Posting]]):
         with out_path.open("wb") as f:
             f.write(MAGIC)
             f.write(
-                struct.pack("<BII", int(self.has_positions), len(self._docs), len(self._postings))
+                struct.pack("<BII", int(self.has_positions), len(self._docs), len(self._doc_ids))
             )
 
             for doc in self._docs:
@@ -176,14 +242,17 @@ class Index(Mapping[str, list[Posting]]):
                 f.write(path_b)
                 f.write(struct.pack("<I", doc.length))
 
-            for term, plist in self._postings.items():
+            for term, d_ids in self._doc_ids.items():
+                tfs = self._tfs[term]
+                pos_tuple = self._positions.get(term)
                 term_b = term.encode("utf-8")
-                f.write(struct.pack("<HI", len(term_b), len(plist)))
+                f.write(struct.pack("<HI", len(term_b), int(d_ids.size)))
                 f.write(term_b)
 
-                for doc_id, tf, positions in plist:
+                for idx_i, (doc_id, tf) in enumerate(zip(d_ids.tolist(), tfs.tolist(), strict=True)):
                     f.write(struct.pack("<II", doc_id, tf))
                     if self.has_positions:
+                        positions = pos_tuple[idx_i] if pos_tuple is not None else ()
                         arr = array.array("I", positions)
                         arr.tofile(f)
 
@@ -211,23 +280,39 @@ class Index(Mapping[str, list[Posting]]):
                 (length,) = struct.unpack("<I", f.read(4))
                 docs.append(DocumentMeta(doc_id=doc_id, name=name, path=doc_path, length=length))
 
-            postings: dict[str, list[Posting]] = {}
+            posting_doc_ids: dict[str, Int32Array] = {}
+            posting_tfs: dict[str, Int32Array] = {}
+            posting_positions: dict[str, tuple[tuple[int, ...], ...]] = {}
+
             for _ in range(num_terms):
                 term_len, plist_len = struct.unpack("<HI", f.read(6))
                 term = f.read(term_len).decode("utf-8")
 
-                plist: list[Posting] = []
-                for _ in range(plist_len):
+                d_arr = np.empty(plist_len, dtype=np.int32)
+                tf_arr = np.empty(plist_len, dtype=np.int32)
+                pos_list: list[tuple[int, ...]] = []
+
+                for i in range(plist_len):
                     doc_id, tf = struct.unpack("<II", f.read(8))
+                    d_arr[i] = doc_id
+                    tf_arr[i] = tf
                     if has_positions:
                         arr = array.array("I")
                         arr.fromfile(f, tf)
-                        plist.append((doc_id, tf, tuple(arr)))
-                    else:
-                        plist.append((doc_id, tf, ()))
-                postings[term] = plist
+                        pos_list.append(tuple(arr))
 
-        return cls(postings=postings, docs=docs, has_positions=has_positions)
+                posting_doc_ids[term] = d_arr
+                posting_tfs[term] = tf_arr
+                if has_positions:
+                    posting_positions[term] = tuple(pos_list)
+
+        return cls(
+            docs=docs,
+            has_positions=has_positions,
+            posting_doc_ids=posting_doc_ids,
+            posting_tfs=posting_tfs,
+            posting_positions=posting_positions,
+        )
 
 
 @contextmanager
@@ -337,6 +422,7 @@ def merge_partial_indexes(
 
     return Index(postings=dict(merged_postings), docs=merged_docs, has_positions=store_positions)
 
+
 def build_parallel_index(
     corpus_dir: str | Path,
     workers: int | None = None,
@@ -383,10 +469,10 @@ def build_parallel_index(
         except Exception:
             pool.shutdown(wait=False, cancel_futures=True)
             raise
-        else:
+        finally:
             pool.shutdown(wait=True)
 
     t_merge0 = time.perf_counter()
-    final_index = merge_partial_indexes(partials, store_positions=store_positions)
+    merged = merge_partial_indexes(partials, store_positions=store_positions)
     merge_elapsed = time.perf_counter() - t_merge0
-    return final_index, BuildStats(merge_time_sec=merge_elapsed, num_chunks=len(chunks))
+    return merged, BuildStats(merge_time_sec=merge_elapsed, num_chunks=len(chunks))

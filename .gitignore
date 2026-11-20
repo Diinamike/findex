@@ -11,3 +11,5 @@ data/
 *.tar.gz
 *.bin
 dist/
+index.pkl
+*.pkl
