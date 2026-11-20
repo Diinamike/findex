@@ -3,22 +3,38 @@ from __future__ import annotations
 import array
 import struct
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 
 from findex.corpus import iter_documents
 from findex.tokenizer import tokenize
 from findex.utils import timed
 
-Posting = Tuple[int, int, Tuple[int, ...]]
-MAGIC = b"FIDX03"
+Posting = tuple[int, int, tuple[int, ...]]
+MAGIC = b"FIDX04"
 
 
-@dataclass
+def merge_postings(left: list[int], right: list[int]) -> list[int]:
+    """Двовказівниковий перетин двох відсортованих списків doc_id за O(L1 + L2)."""
+    result: list[int] = []
+    i = 0
+    j = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            result.append(left[i])
+            i += 1
+            j += 1
+        elif left[i] < right[j]:
+            i += 1
+        else:
+            j += 1
+    return result
+
+
+@dataclass(frozen=True)
 class DocumentMeta:
     doc_id: int
     name: str
@@ -26,19 +42,19 @@ class DocumentMeta:
     length: int
 
 
-class Index(Mapping[str, List[Posting]]):
+class Index(Mapping[str, list[Posting]]):
     def __init__(
         self,
-        postings: Optional[Dict[str, List[Posting]]] = None,
-        docs: Optional[List[DocumentMeta]] = None,
+        postings: dict[str, list[Posting]] | None = None,
+        docs: list[DocumentMeta] | None = None,
         has_positions: bool = True,
     ) -> None:
-        self._postings: Dict[str, List[Posting]] = postings or {}
-        self._docs: List[DocumentMeta] = docs or []
+        self._postings: dict[str, list[Posting]] = postings or {}
+        self._docs: list[DocumentMeta] = docs or []
         self.has_positions: bool = has_positions
         self._closed: bool = False
 
-    def __getitem__(self, term: str) -> List[Posting]:
+    def __getitem__(self, term: str) -> list[Posting]:
         self._ensure_open()
         return self._postings[term]
 
@@ -75,6 +91,12 @@ class Index(Mapping[str, List[Posting]]):
         postings = self._postings.get(term)
         return len(postings) if postings else 0
 
+    def doc_ids_for(self, term: str) -> list[int]:
+        postings = self._postings.get(term)
+        if not postings:
+            return []
+        return [doc_id for doc_id, _, _ in postings]
+
     def get_doc(self, doc_id: int) -> DocumentMeta:
         return self._docs[doc_id]
 
@@ -96,32 +118,35 @@ class Index(Mapping[str, List[Posting]]):
     @timed
     def build(
         cls,
-        corpus_dir: Union[str, Path],
+        corpus_dir: str | Path,
         store_positions: bool = True,
-    ) -> "Index":
+        on_progress: Callable[[int, str], None] | None = None,
+    ) -> Index:
         corpus_path = Path(corpus_dir)
-        postings_map: Dict[str, List[Posting]] = defaultdict(list)
-        docs_meta: List[DocumentMeta] = []
+        postings_map: dict[str, list[Posting]] = defaultdict(list)
+        docs_meta: list[DocumentMeta] = []
 
         for doc_id, (filename, text) in enumerate(iter_documents(corpus_path)):
-            term_positions: Dict[str, List[int]] = defaultdict(list)
+            if on_progress is not None:
+                on_progress(doc_id + 1, filename)
+
+            term_positions: dict[str, list[int]] = defaultdict(list)
             token_count = 0
 
             for pos, token in enumerate(tokenize(text)):
                 token_count += 1
                 if store_positions:
                     term_positions[token].append(pos)
+                elif token not in term_positions:
+                    term_positions[token] = [1]
                 else:
-                    if token not in term_positions:
-                        term_positions[token] = [0]
-                    else:
-                        term_positions[token][0] += 1
+                    term_positions[token][0] += 1
 
             for term, pos_list in term_positions.items():
                 if store_positions:
                     postings_map[term].append((doc_id, len(pos_list), tuple(pos_list)))
                 else:
-                    postings_map[term].append((doc_id, pos_list[0] + 1, ()))
+                    postings_map[term].append((doc_id, pos_list[0], ()))
 
             full_path = str((corpus_path / filename).resolve())
             docs_meta.append(
@@ -130,11 +155,13 @@ class Index(Mapping[str, List[Posting]]):
 
         return cls(postings=dict(postings_map), docs=docs_meta, has_positions=store_positions)
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         out_path = Path(path)
         with out_path.open("wb") as f:
             f.write(MAGIC)
-            f.write(struct.pack("<BII", int(self.has_positions), len(self._docs), len(self._postings)))
+            f.write(
+                struct.pack("<BII", int(self.has_positions), len(self._docs), len(self._postings))
+            )
 
             for doc in self._docs:
                 name_b = doc.name.encode("utf-8")
@@ -158,8 +185,11 @@ class Index(Mapping[str, List[Posting]]):
 
     @classmethod
     @timed
-    def load(cls, path: Union[str, Path]) -> "Index":
+    def load(cls, path: str | Path) -> Index:
         in_path = Path(path)
+        if not in_path.exists():
+            raise FileNotFoundError(f"Index file not found: {in_path}")
+
         with in_path.open("rb") as f:
             magic = f.read(len(MAGIC))
             if magic != MAGIC:
@@ -168,7 +198,7 @@ class Index(Mapping[str, List[Posting]]):
             has_pos_flag, num_docs, num_terms = struct.unpack("<BII", f.read(9))
             has_positions = bool(has_pos_flag)
 
-            docs: List[DocumentMeta] = []
+            docs: list[DocumentMeta] = []
             for doc_id in range(num_docs):
                 (name_len,) = struct.unpack("<H", f.read(2))
                 name = f.read(name_len).decode("utf-8")
@@ -177,12 +207,12 @@ class Index(Mapping[str, List[Posting]]):
                 (length,) = struct.unpack("<I", f.read(4))
                 docs.append(DocumentMeta(doc_id=doc_id, name=name, path=doc_path, length=length))
 
-            postings: Dict[str, List[Posting]] = {}
+            postings: dict[str, list[Posting]] = {}
             for _ in range(num_terms):
                 term_len, plist_len = struct.unpack("<HI", f.read(6))
                 term = f.read(term_len).decode("utf-8")
 
-                plist: List[Posting] = []
+                plist: list[Posting] = []
                 for _ in range(plist_len):
                     doc_id, tf = struct.unpack("<II", f.read(8))
                     if has_positions:
@@ -197,7 +227,7 @@ class Index(Mapping[str, List[Posting]]):
 
 
 @contextmanager
-def open_index(path: Union[str, Path]) -> Iterator[Index]:
+def open_index(path: str | Path) -> Generator[Index]:
     idx = Index.load(path)
     try:
         yield idx

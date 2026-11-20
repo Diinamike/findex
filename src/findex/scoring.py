@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
-from findex.index import Index
+if TYPE_CHECKING:
+    from findex.index import Index
+
+ScorerName = Literal["bm25", "tfidf"]
 
 
 @dataclass(order=True)
@@ -17,8 +20,7 @@ class SearchResult:
 
 @runtime_checkable
 class Scorer(Protocol):
-    def score_term(self, term: str, tf: int, doc_length: int, index: Index) -> float:
-        ...
+    def score_term(self, term: str, tf: int, doc_length: int, index: Index) -> float: ...
 
 
 class TfIdf:
@@ -47,3 +49,9 @@ class BM25:
         denom = tf + self.k1 * (1.0 - self.b + self.b * (doc_length / avgdl))
         tf_norm = (tf * (self.k1 + 1.0)) / denom
         return idf * tf_norm
+
+
+def get_scorer(name: ScorerName) -> Scorer:
+    if name == "bm25":
+        return BM25()
+    return TfIdf()

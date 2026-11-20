@@ -1,53 +1,62 @@
-# findex — Лабораторна 3: Рейтинг і модель об’єктів (dunder-методи, протоколи, декоратори)
+# findex — Лабораторна 4: Типи, тести, пакування і CLI
 
-Продовження розробки пошукового рушія `findex`: інвертований індекс як об’єкт Python (`collections.abc.Mapping`), парсер мови запитів методом рекурсивного спуску, взаємозамінні алгоритми ранжування (**TF-IDF** та **Okapi BM25**) через протоколи, кешування через `@lru_cache`, `@timed` та сніпети.
+[![CI](https://github.com/Diinamike/findex/actions/workflows/ci.yml/badge.svg?branch=lab-04-branch)](https://github.com/Diinamike/findex/actions/workflows/ci.yml)
 
-## 1. Модель об’єктів Python: `Index(Mapping)`, дескриптори та `open_index`
-- `Index(collections.abc.Mapping)` (`src/findex/index.py`) на корпусі з **1 000 книг** (`63 591 631` токенів, `435 397` унікальних термів, `avg_doc_length = 63 591.6`): реалізовано `__len__`, `__contains__`, `__getitem__`, `__iter__`, `__repr__`, `num_docs`, `df(term)` та `@cached_property` для `avg_doc_length`.
-- `open_index(path)` (`@contextmanager`): гарантує виклик `index.close()` навіть при винятку.
-- Підтримка позицій (`store_positions=True`) для точного фразового пошуку.
+Повнотекстова пошукова система `findex` (версія `0.4.0`), оформлена як інстальований Python-пакет із суворою типізацією (`pyright --strict`), 33 тестами (`pytest` + `Hypothesis`), CLI на базі `typer` та `rich`, структурованим логуванням у `stderr` і автоматизованим CI у GitHub Actions.
 
-## 2. Парсер мови запитів (рекурсивний спуск) та AST
-- Граматика (`src/findex/query.py`): `(...)` -> `NOT` -> `AND` (та неявний `AND`) -> `OR`.
-- AST-вузли `Term`, `Phrase`, `And`, `Or`, `Not` підтримують `&`, `|`, `~` і `evaluate(index)`.
+## 1. Статична типізація (`pyright --strict`) та архітектура
 
-## 3. Ранжування документів: Протокол `Scorer`, TF-IDF та BM25
+- У `pyproject.toml` увімкнено `typeCheckingMode = "strict"` — перевірка проходить із **0 помилками** та без жодного `# type: ignore`.
+- `Scorer` (`src/findex/scoring.py`) реалізовано як `@runtime_checkable class Scorer(Protocol)` — `TfIdf` і `BM25` проходять перевірку сумісності структурно без успадкування.
+- Потокові генератори (`iter_documents`, `tokenize`) типізовано як `Iterator[...]`, менеджер контексту `open_index` — як `Generator[Index]`.
+- Варіантні рядкові параметри типізовано через `Literal["bm25", "tfidf"]` та `Literal["set", "merge"]`.
 
-### Перевірки адекватності (Sanity-Check) для `BM25(k1=1.5, b=0.75)`
-1. **Рідкий термін вище частого** (`tf=1`, середня довжина документа): `score("sherlock") = 3.6701 > score("time") = 0.0105` (`True`).
-2. **Насичення частоти (20-те повторення)**: 1-ше входження `+3.6701`, 20-те `+0.0312` (< 1% від першого) (`True`).
-3. **Нормалізація довжини документа** (`tf=1` для `"sherlock"`): `short(1 000) = 6.5881 > long(200 000) = 1.8675` (`True`).
+## 2. Встановлення та CLI (`typer` + `rich`)
 
-### Порівняння якості пошуку: `Precision@5` (TF-IDF vs BM25)
+```bash
+# Встановлення пакета у глобальне середовище користувача (кладе findex у PATH)
+uv tool install .
 
-| № | Запит | Очікуваний документ у топ-5 | TF-IDF P@5 | BM25 P@5 |
-|---|-------|-----------------------------|------------|----------|
-| 1 | `sherlock holmes` | `The_Adventures_of_Sherlock_Holmes_1661.txt` | 1.00 | 1.00 |
-| 2 | `hamlet ophelia` | `Hamlet_1787.txt` | 1.00 | 1.00 |
-| 3 | `macbeth duncan` | `Macbeth_1795.txt` | 1.00 | 1.00 |
-| 4 | `othello desdemona` | `Othello_1793.txt` | 1.00 | 1.00 |
-| 5 | `romeo juliet` | `Romeo_and_Juliet_1777.txt` | 1.00 | 1.00 |
-| 6 | `darwin natural selection` | `Darwin_and_Modern_Science_1909.txt`, `The_Autobiography_of_Charles_Darwin_2010.txt` | 1.00 | 1.00 |
-| 7 | `odysseus penelope` | `The_Odyssey_1727.txt` | 1.00 | 1.00 |
-| 8 | `julius caesar brutus` | `Julius_Caesar_1785.txt` | 1.00 | 1.00 |
-| 9 | `don quixote sancho` | `Don_Quijote_2000.txt` *(іспанський текст: Quijote)* | 0.00 | 0.00 |
-| 10 | `clausewitz war strategy` | `On_War_1946.txt` | 1.00 | 1.00 |
-| **Середнє** | **10 запитів** | — | **0.90** | **0.90** |
+# 1. Побудова інвертованого індексу зі смугою прогресу rich
+findex index data/corpus --out index.bin
 
-## 4. Декоратори `@timed`, `@lru_cache` та сніпети (`±80` символів)
+# 2. Пошук із форматованою таблицею rich (або чистий JSON у stdout для перенаправлення)
+findex search index.bin '(sherlock OR holmes) AND "baker street" NOT watson' --top-k 5
+findex search index.bin 'sherlock' --scorer tfidf --engine merge --json > results.json
 
-```text
-[INFO] Index.build executed in 30.7400 s
-Index(docs=1000, terms=435397, positions=True, status='open'), avg_doc_length=63591.6
-[INFO] Index.load executed in 6.1923 s
-Query: (sherlock OR holmes) AND "baker street" NOT watson
-[INFO] Query '(sherlock OR holmes) AND "baker street" NOT watson' -> CACHE MISS (hits=0, misses=1)
-[INFO] SearchEngine.search executed in 0.0149 s
-  [15.7988] Gutenberg_Book_1264_1264.txt: ...machinery, a threshing-machine, say, or one of those hay-making furies. But [Sherlock] [Holmes] (now happily dead) would have fancied nothing of the kind. He...
-[INFO] Query '(sherlock OR holmes) AND "baker street" NOT watson' -> CACHE HIT (hits=1, misses=1)
-[INFO] SearchEngine.search executed in 0.0110 s
-CacheInfo(hits=1, misses=1, maxsize=128, currsize=1)
-## 5. Використання
-uv run pytest -v
-uv run python scripts/evaluate_lab03.py
-uv run python scripts/benchmark_p5.py
+# 3. Статистика індексу та топ найчастіших термів
+findex stats index.bin --top 10
+
+# 4. Діагностичні логи в stderr (-v -> INFO, -vv -> DEBUG)
+findex -v search index.bin 'sherlock'
+```bash
+cat << 'EOF' >> README.md
+
+## 3. Тестування (`pytest` + `Hypothesis`) та покриття коду
+
+Набір із **33 тестів** (`tests/test_tokenizer.py`, `tests/test_lab04.py`, фікстури у `tests/conftest.py`) перевіряє:
+- токенізатор (`@pytest.mark.parametrize`, Unicode NFKC-лігатури, апострофи, дефіси, кирилиця);
+- збірку індексу, dunder-методи `Mapping`, `@cached_property` та звільнення ресурсів у `open_index` при винятку;
+- парсер запитів (порівняння AST-дерев `Term`, `Phrase`, `And`, `Or`, `Not` та синтаксичні помилки);
+- протокол `Scorer`, `TfIdf`, `BM25` (усі 3 sanity-check із ЛР 3), серіалізацію `save` / `load` і CLI через `typer.testing.CliRunner`;
+- **3 властивості Hypothesis**: `load(save(index))` відновлює ідентичний індекс; постінги завжди відсортовані за зростанням `doc_id`; `merge_postings` збігається з перетином `set`;
+- повільні інтеграційні тести виділено маркером `@pytest.mark.slow`.
+
+### Звіт покриття (`uv run pytest --cov=findex --cov-report=term-missing`)
+
+| Модуль | Покриття | Примітка |
+|--------|----------|----------|
+| `src/findex/__init__.py` | **100%** | Публічний API пакета |
+| `src/findex/tokenizer.py` | **100%** | Потоковий Unicode-токенізатор |
+| `src/findex/utils.py` | **100%** | Декоратор `@timed` (`ParamSpec`) |
+| `src/findex/index.py` | **98%** | `Index(Mapping)`, бінарний формат, `merge_postings` |
+| `src/findex/scoring.py` | **92%** | Протокол `Scorer`, `TfIdf`, `BM25` |
+| `src/findex/search.py` | **92%** | `SearchEngine`, `@lru_cache`, сніпети |
+| `src/findex/query.py` | **89%** | Лексер, рекурсивний спуск, AST-вузли |
+| `src/findex/cli.py` | **88%** | Команди `index`, `search`, `stats`, обробка помилок |
+| `src/findex/stats.py` | **0%** | Допоміжний бенчмарк Lazy vs Eager з ЛР 1 (навмисно поза CLI-покриттям) |
+| **Загальне покриття** | **87%** | **33 passed (603 / 696 statements)** |
+
+**Що навмисно залишено поза покриттям (13%):**
+1. Модуль `src/findex/stats.py` (43 рядки) — бенчмарк порівняння лінивого та жадібного конвеєрів із Лабораторної 1, який не входить до рантайму CLI `findex`.
+2. Низькорівневі гілки помилок файлової системи (`OSError` / `PermissionError` при читанні битих файлів у `corpus.py` та `cli.py`) та захисні `NotImplementedError` у базовому класі `QueryNode`.

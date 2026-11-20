@@ -1,18 +1,19 @@
 [project]
 name = "findex"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.4.0"
+description = "Full-text search engine with inverted index, recursive descent query parser, and TF-IDF/BM25 ranking"
 readme = "README.md"
 authors = [
     { name = "Diinamike", email = "tadiana06@gmail.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
-    "requests>=2.32.5",
+    "typer>=0.15.0",
+    "rich>=13.9.0",
 ]
 
 [project.scripts]
-findex = "findex:main"
+findex = "findex.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
@@ -21,4 +22,22 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
+    "pytest-cov>=6.0.0",
+    "hypothesis>=6.115.0",
+    "pyright>=1.1.390",
+    "ruff>=0.8.0",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests that take more than 1 second",
 ]

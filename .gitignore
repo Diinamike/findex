@@ -10,3 +10,4 @@ data/
 *.zip
 *.tar.gz
 *.bin
+dist/
